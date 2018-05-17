@@ -64,6 +64,20 @@ void ScriptPubKeyToJSON(const Config &config, const CScript &scriptPubKey,
     out.pushKV("addresses", a);
 }
 
+int64_t GetInputAmount(const Config &config, std::string txid, int outNumber) {
+    uint256 hash = ParseHashUV(txid, "txid");
+
+    CTransactionRef tx;
+    uint256 hashBlock;
+    GetTransaction(config, hash, tx, hashBlock, true);
+    if(!tx) {
+        return 0;
+    }
+    const CTxOut& txout = tx->vout[outNumber];
+
+    return txout.nValue.GetSatoshis();
+}
+
 void TxToJSON(const Config &config, const CTransaction &tx,
               const uint256 hashBlock, UniValue &entry) {
     entry.pushKV("txid", tx.GetId().GetHex());
@@ -115,6 +129,76 @@ void TxToJSON(const Config &config, const CTransaction &tx,
         if (mi != mapBlockIndex.end() && (*mi).second) {
             CBlockIndex *pindex = (*mi).second;
             if (chainActive.Contains(pindex)) {
+                entry.push_back(Pair("confirmations", 1 + chainActive.Height() -
+                                                          pindex->nHeight));
+                entry.push_back(Pair("time", pindex->GetBlockTime()));
+                entry.push_back(Pair("blocktime", pindex->GetBlockTime()));
+            } else {
+                entry.push_back(Pair("confirmations", 0));
+            }
+        }
+    }
+}
+
+void TxToJSONExt(const Config &config, const CTransaction &tx,
+              const uint256 hashBlock, UniValue &entry) {
+    int64_t inValue = 0;
+
+    entry.push_back(Pair("txid", tx.GetId().GetHex()));
+    entry.push_back(Pair("hash", tx.GetHash().GetHex()));
+    entry.push_back(Pair(
+        "size", (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION)));
+    entry.push_back(Pair("version", tx.nVersion));
+    entry.push_back(Pair("locktime", (int64_t)tx.nLockTime));
+
+    UniValue vin(UniValue::VARR);
+    for (unsigned int i = 0; i < tx.vin.size(); i++) {
+        const CTxIn &txin = tx.vin[i];
+        UniValue in(UniValue::VOBJ);
+        if (tx.IsCoinBase()) {
+            in.push_back(Pair("coinbase", HexStr(txin.scriptSig.begin(),
+                                                 txin.scriptSig.end())));
+        } else {
+            inValue += GetInputAmount(config, txin.prevout.hash.GetHex(), txin.prevout.n);
+            in.push_back(Pair("txid", txin.prevout.hash.GetHex()));
+            in.push_back(Pair("vout", (int64_t)txin.prevout.n));
+            UniValue o(UniValue::VOBJ);
+            o.push_back(Pair("asm", ScriptToAsmStr(txin.scriptSig, true)));
+            o.push_back(Pair(
+                "hex", HexStr(txin.scriptSig.begin(), txin.scriptSig.end())));
+            in.push_back(Pair("scriptSig", o));
+        }
+
+        in.push_back(Pair("sequence", (int64_t)txin.nSequence));
+        vin.push_back(in);
+    }
+
+    entry.push_back(Pair("vin", vin));
+
+    if(!tx.IsCoinBase() && inValue != 0) {
+        entry.push_back(Pair("satByte",  (inValue - tx.GetValueOut().GetSatoshis()) / (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION)));
+    }
+
+    UniValue vout(UniValue::VARR);
+    for (unsigned int i = 0; i < tx.vout.size(); i++) {
+        const CTxOut &txout = tx.vout[i];
+        UniValue out(UniValue::VOBJ);
+        out.push_back(Pair("value", ValueFromAmount(txout.nValue)));
+        out.push_back(Pair("n", (int64_t)i));
+        UniValue o(UniValue::VOBJ);
+        ScriptPubKeyToJSON(config, txout.scriptPubKey, o, true);
+        out.push_back(Pair("scriptPubKey", o));
+        vout.push_back(out);
+    }
+
+    entry.push_back(Pair("vout", vout));
+
+    if (!hashBlock.IsNull()) {
+        entry.push_back(Pair("blockhash", hashBlock.GetHex()));
+        BlockMap::iterator mi = mapBlockIndex.find(hashBlock);
+        if (mi != mapBlockIndex.end() && (*mi).second) {
+            CBlockIndex *pindex = (*mi).second;
+            if (chainActive.Contains(pindex)) {
                 entry.push_back(
                     Pair("confirmations",
                          1 + chainActive.Height() - pindex->nHeight));
@@ -126,6 +210,8 @@ void TxToJSON(const Config &config, const CTransaction &tx,
         }
     }
 }
+
+
 
 static UniValue getrawtransaction(const Config &config,
                                   const JSONRPCRequest &request) {
@@ -1258,6 +1344,136 @@ static UniValue sendrawtransaction(const Config &config,
     return txid.GetHex();
 }
 
+UniValue signsendrawtransaction(const Config &config, const JSONRPCRequest& request)
+{
+	JSONRPCRequest reqSend = JSONRPCRequest();
+	JSONRPCRequest reqSign = JSONRPCRequest();
+	reqSend.params = UniValue(UniValue::VARR);
+	reqSign.params = UniValue(UniValue::VARR);
+	
+	reqSign.params.push_back(request.params[0]);
+	reqSign.params.push_back(request.params[1]);
+	reqSign.params.push_back(request.params[2]);
+	
+	UniValue signedRawTransaction = signrawtransaction(config, reqSign);
+	
+	reqSend.params.push_back(signedRawTransaction["hex"]);
+	if (request.params.size() > 3)
+		reqSend.params.push_back(request.params[3]);
+	
+	return sendrawtransaction(config, reqSend);
+}
+
+UniValue reqAddresses;
+
+bool inReqAddresses(const std::string& addr)
+{
+	for(unsigned int i = 0; i < reqAddresses.size(); i++) {
+		if(addr.compare(reqAddresses[i].get_str()) == 0 )
+			return true;
+	}
+	return false;
+}
+
+bool inRequest(const CTransaction& tx)
+{
+    txnouttype type;
+    std::vector<CTxDestination> addresses;
+    int nRequired;
+	
+    for (unsigned int i = 0; i < tx.vout.size(); i++) {
+        ExtractDestinations(tx.vout[i].scriptPubKey, type, addresses, nRequired);
+		
+	    for (const CTxDestination& addr : addresses)
+	        if(inReqAddresses(EncodeDestination(addr)))
+				return true;
+    }
+	return false;
+}
+
+bool inTime(const CTransaction& tx)
+{
+	return false;
+}
+
+UniValue getrtx(const Config &config, const std::string& txid, bool checkInReq = false)
+{
+	UniValue null(UniValue::VNULL);
+	
+    LOCK(cs_main);
+
+    uint256 hash = ParseHashV(txid, "parameter 1");
+
+    CTransactionRef tx;
+    uint256 hashBlock;
+    if (!GetTransaction(GetConfig(), hash, tx, hashBlock, true))
+        return null;
+	
+	if(checkInReq)
+		if(!inRequest(*tx))
+			return null;
+
+    UniValue result(UniValue::VOBJ);
+    TxToJSONExt(config, *tx, hashBlock, result);
+    return result;
+}
+
+UniValue gettxsfrommempoolbyaddresses(const Config &config, const JSONRPCRequest& request)
+{
+	reqAddresses = request.params;
+	
+    std::vector<uint256> vtxid;
+    mempool.queryHashes(vtxid);
+
+	UniValue tmp;
+    UniValue a(UniValue::VARR);
+    for (const uint256& hash : vtxid) {
+        tmp = getrtx(config, hash.ToString(), true);
+		if(!tmp.isNull())
+			a.push_back(tmp);
+    }
+
+    return a;
+}
+
+static std::map<std::string, int> last_times = {};
+
+UniValue getTxHashesByTime(UniValue id)
+{
+	UniValue a(UniValue::VARR);
+	int last_time = GetTime();
+	
+	if(last_times.find(id.get_str()) != last_times.end()) {
+		last_time = last_times[id.get_str()];
+		last_times[id.get_str()] = GetTime();
+	} else {
+		last_times[id.get_str()] = last_time;
+	}
+	
+	last_time -= 60;
+	
+    LOCK(mempool.cs);
+    for (const CTxMemPoolEntry& e : mempool.mapTx)
+    {
+		if(e.GetTime() > last_time)
+			a.push_back(e.GetTx().GetHash().ToString());
+    }
+	
+	return a;
+}
+
+UniValue getextendrawmempool(const Config &config, const JSONRPCRequest& request)
+{	
+	UniValue result(UniValue::VARR);
+	UniValue hashes = getTxHashesByTime(request.params[0]);
+
+	for(size_t i = 0; i < hashes.size() && i < 1000; i++) {
+        result.push_back(getrtx(config, hashes[i].get_str()));
+	}
+	
+    return result;
+}
+
 // clang-format off
 static const ContextFreeRPCCommand commands[] = {
     //  category            name                      actor (function)        argNames
@@ -1269,9 +1485,12 @@ static const ContextFreeRPCCommand commands[] = {
     { "rawtransactions",    "sendrawtransaction",     sendrawtransaction,     {"hexstring","allowhighfees"} },
     { "rawtransactions",    "combinerawtransaction",  combinerawtransaction,  {"txs"} },
     { "rawtransactions",    "signrawtransaction",     signrawtransaction,     {"hexstring","prevtxs","privkeys","sighashtype"} }, /* uses wallet if enabled */
+    { "rawtransactions",    "signsendrawtransaction", signsendrawtransaction, {"hexstring","prevtxs","privkeys","sighashtype"} }, /* uses wallet if enabled */
 
     { "blockchain",         "gettxoutproof",          gettxoutproof,          {"txids", "blockhash"} },
     { "blockchain",         "verifytxoutproof",       verifytxoutproof,       {"proof"} },
+    { "blockchain",         "gettxsfrommempoolbyaddresses", gettxsfrommempoolbyaddresses,    	  {"txid", "txid1", "txid2", "..."} },
+    { "blockchain",         "getextendrawmempool",    		getextendrawmempool,    			  {"id"} },
 };
 // clang-format on
 
