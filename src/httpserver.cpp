@@ -283,7 +283,8 @@ static void http_request_cb(struct evhttp_request *req, void *arg) {
             LogPrintf("WARNING: request rejected because http work queue depth "
                       "exceeded, it can be increased with the -rpcworkqueue= "
                       "setting\n");
-            item->req->WriteReply(HTTP_INTERNAL, "Work queue depth exceeded");
+            item->req->WriteHeader("Content-Type", "application/json");
+            item->req->WriteReply(HTTP_INTERNAL, "{\"error\": \"Work queue depth exceeded\"}");
         }
     } else {
         hreq->WriteReply(HTTP_NOTFOUND);

@@ -145,6 +145,53 @@ UniValue blockToJSON(const Config &config, const CBlock &block,
     return result;
 }
 
+UniValue blockToJSONExt(const Config &config, const CBlock &block,
+                     const CBlockIndex *blockindex, bool txDetails) {
+    UniValue result(UniValue::VOBJ);
+    result.push_back(Pair("hash", blockindex->GetBlockHash().GetHex()));
+    int confirmations = -1;
+    // Only report confirmations if the block is on the main chain
+    if (chainActive.Contains(blockindex)) {
+        confirmations = chainActive.Height() - blockindex->nHeight + 1;
+    }
+    result.push_back(Pair("confirmations", confirmations));
+    result.push_back(Pair(
+        "size", (int)::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION)));
+    result.push_back(Pair("height", blockindex->nHeight));
+    result.push_back(Pair("version", block.nVersion));
+    result.push_back(Pair("versionHex", strprintf("%08x", block.nVersion)));
+    result.push_back(Pair("merkleroot", block.hashMerkleRoot.GetHex()));
+    UniValue txs(UniValue::VARR);
+    for (const auto &tx : block.vtx) {
+        if (txDetails) {
+            UniValue objTx(UniValue::VOBJ);
+            TxToJSONExt(config, *tx, uint256(), objTx);
+            txs.push_back(objTx);
+        } else {
+            txs.push_back(tx->GetId().GetHex());
+        }
+    }
+    result.push_back(Pair("tx", txs));
+    result.push_back(Pair("time", block.GetBlockTime()));
+    result.push_back(
+        Pair("mediantime", int64_t(blockindex->GetMedianTimePast())));
+    result.push_back(Pair("nonce", uint64_t(block.nNonce)));
+    result.push_back(Pair("bits", strprintf("%08x", block.nBits)));
+    result.push_back(Pair("difficulty", GetDifficulty(blockindex)));
+    result.push_back(Pair("chainwork", blockindex->nChainWork.GetHex()));
+
+    if (blockindex->pprev) {
+        result.push_back(Pair("previousblockhash",
+                              blockindex->pprev->GetBlockHash().GetHex()));
+    }
+    CBlockIndex *pnext = chainActive.Next(blockindex);
+    if (pnext) {
+        result.push_back(Pair("nextblockhash", pnext->GetBlockHash().GetHex()));
+    }
+    return result;
+}
+
+
 UniValue getblockcount(const Config &config, const JSONRPCRequest &request) {
     if (request.fHelp || request.params.size() != 0) {
         throw std::runtime_error(
@@ -1726,6 +1773,108 @@ UniValue getchaintxstats(const Config &config, const JSONRPCRequest &request) {
     return ret;
 }
 
+static std::map<std::string, UniValue> blockCache = {};
+static std::map<std::string, bool> blockProcessStatus = {};
+
+UniValue getextendedblock(const Config &config, const JSONRPCRequest &request) {
+    if (request.fHelp || request.params.size() < 1 ||
+        request.params.size() > 2) {
+        throw std::runtime_error(
+            "getblock \"blockhash\" ( verbose )\n"
+            "\nIf verbose is false, returns a string that is serialized, "
+            "hex-encoded data for block 'hash'.\n"
+            "If verbose is true, returns an Object with information about "
+            "block <hash>.\n"
+            "\nArguments:\n"
+            "1. \"blockhash\"          (string, required) The block hash\n"
+            "\nResult (for verbose = true):\n"
+            "{\n"
+            "  \"hash\" : \"hash\",     (string) the block hash (same as "
+            "provided)\n"
+            "  \"confirmations\" : n,   (numeric) The number of confirmations, "
+            "or -1 if the block is not on the main chain\n"
+            "  \"size\" : n,            (numeric) The block size\n"
+            "  \"height\" : n,          (numeric) The block height or index\n"
+            "  \"version\" : n,         (numeric) The block version\n"
+            "  \"versionHex\" : \"00000000\", (string) The block version "
+            "formatted in hexadecimal\n"
+            "  \"merkleroot\" : \"xxxx\", (string) The merkle root\n"
+            "  \"tx\" : [               (array of string) The transaction ids\n"
+            "     \"transactionid:\"    (string) The transaction id\n"
+			"					{tx}"
+            "     ,...\n"
+            "  ],\n"
+            "  \"time\" : ttt,          (numeric) The block time in seconds "
+            "since epoch (Jan 1 1970 GMT)\n"
+            "  \"mediantime\" : ttt,    (numeric) The median block time in "
+            "seconds since epoch (Jan 1 1970 GMT)\n"
+            "  \"nonce\" : n,           (numeric) The nonce\n"
+            "  \"bits\" : \"1d00ffff\", (string) The bits\n"
+            "  \"difficulty\" : x.xxx,  (numeric) The difficulty\n"
+            "  \"chainwork\" : \"xxxx\",  (string) Expected number of hashes "
+            "required to produce the chain up to this block (in hex)\n"
+            "  \"previousblockhash\" : \"hash\",  (string) The hash of the "
+            "previous block\n"
+            "  \"nextblockhash\" : \"hash\"       (string) The hash of the "
+            "next block\n"
+            "}\n"
+            "\nResult (for verbose=false):\n"
+            "\"data\"             (string) A string that is serialized, "
+            "hex-encoded data for block 'hash'.\n"
+            "\nExamples:\n" +
+            HelpExampleCli("getblock", "\"00000000c937983704a73af28acdec37b049d"
+                                       "214adbda81d7e2a3dd146f6ed09\"") +
+            HelpExampleRpc("getblock", "\"00000000c937983704a73af28acdec37b049d"
+                                       "214adbda81d7e2a3dd146f6ed09\""));
+    }
+
+    std::string strHash = request.params[0].get_str();
+
+    if(blockProcessStatus.find(strHash) != blockProcessStatus.end()) {
+        if(!blockProcessStatus[strHash]) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
+        }
+    }
+
+    if(blockCache.find(strHash) != blockCache.end()) {
+        return blockCache[strHash];
+    } else if (blockCache.size() >= 100){
+        blockCache.erase(blockCache.begin());
+        blockProcessStatus.erase(blockProcessStatus.begin());
+    }
+
+    blockProcessStatus[strHash] = false;
+
+    uint256 hash(uint256S(strHash));
+
+    if (mapBlockIndex.count(hash) == 0) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+    }
+
+    CBlock block;
+    CBlockIndex *pblockindex = mapBlockIndex[hash];
+
+    if (fHavePruned && !(pblockindex->nStatus & BLOCK_HAVE_DATA) &&
+        pblockindex->nTx > 0) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+    }
+
+    if (!ReadBlockFromDisk(block, pblockindex, config)) {
+        // Block not found on disk. This could be because we have the block
+        // header in our index but don't have the block (for example if a
+        // non-whitelisted node sends us an unrequested long chain of valid
+        // blocks, we add the headers to our index, but don't accept the block).
+        throw JSONRPCError(RPC_MISC_ERROR, "Block not found on disk");
+    }
+
+    UniValue result = blockToJSONExt(config, block, pblockindex, true);
+
+    blockCache[strHash] = result;
+    blockProcessStatus[strHash] = true;
+
+    return result;
+}
+
 // clang-format off
 static const CRPCCommand commands[] = {
     //  category            name                      actor (function)        okSafe argNames
@@ -1749,6 +1898,7 @@ static const CRPCCommand commands[] = {
     { "blockchain",         "pruneblockchain",        pruneblockchain,        true,  {"height"} },
     { "blockchain",         "verifychain",            verifychain,            true,  {"checklevel","nblocks"} },
     { "blockchain",         "preciousblock",          preciousblock,          true,  {"blockhash"} },
+	{ "blockchain",         "getextendedblock",       getextendedblock,       true,  {"blockhash"} },
 
     /* Not shown in help */
     { "hidden",             "invalidateblock",        invalidateblock,        true,  {"blockhash"} },
