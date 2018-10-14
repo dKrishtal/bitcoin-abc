@@ -113,3 +113,5 @@ contrib/devtools/split-debug.sh
 
 # vagrant
 .vagrant
+
+BCH.*
