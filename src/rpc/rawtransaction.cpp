@@ -65,17 +65,16 @@ void ScriptPubKeyToJSON(const Config &config, const CScript &scriptPubKey,
 }
 
 int64_t GetInputAmount(const Config &config, std::string txid, int outNumber) {
-    uint256 hash = ParseHashUV(txid, "txid");
-
     CTransactionRef tx;
     uint256 hashBlock;
-    GetTransaction(config, hash, tx, hashBlock, true);
+    TxId txId = TxId(ParseHashV(txid, "parameter 1"));
+    GetTransaction(config, txId, tx, hashBlock, true);
     if(!tx) {
         return 0;
     }
     const CTxOut& txout = tx->vout[outNumber];
 
-    return txout.nValue.GetSatoshis();
+    return txout.nValue / SATOSHI;
 }
 
 void TxToJSON(const Config &config, const CTransaction &tx,
@@ -159,9 +158,9 @@ void TxToJSONExt(const Config &config, const CTransaction &tx,
             in.push_back(Pair("coinbase", HexStr(txin.scriptSig.begin(),
                                                  txin.scriptSig.end())));
         } else {
-            inValue += GetInputAmount(config, txin.prevout.hash.GetHex(), txin.prevout.n);
-            in.push_back(Pair("txid", txin.prevout.hash.GetHex()));
-            in.push_back(Pair("vout", (int64_t)txin.prevout.n));
+            inValue += GetInputAmount(config, txin.prevout.GetTxId().GetHex(), txin.prevout.GetN());
+            in.push_back(Pair("txid", txin.prevout.GetTxId().GetHex()));
+            in.push_back(Pair("vout", int64_t(txin.prevout.GetN())));
             UniValue o(UniValue::VOBJ);
             o.push_back(Pair("asm", ScriptToAsmStr(txin.scriptSig, true)));
             o.push_back(Pair(
@@ -176,7 +175,7 @@ void TxToJSONExt(const Config &config, const CTransaction &tx,
     entry.push_back(Pair("vin", vin));
 
     if(!tx.IsCoinBase() && inValue != 0) {
-        entry.push_back(Pair("satByte",  (inValue - tx.GetValueOut().GetSatoshis()) / (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION)));
+        entry.push_back(Pair("satByte",  (inValue - tx.GetValueOut() / SATOSHI) / (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION)));
     }
 
     UniValue vout(UniValue::VARR);
@@ -1402,11 +1401,11 @@ UniValue getrtx(const Config &config, const std::string& txid, bool checkInReq =
 	
     LOCK(cs_main);
 
-    uint256 hash = ParseHashV(txid, "parameter 1");
+    TxId txId = TxId(ParseHashV(txid, "parameter 1"));
 
     CTransactionRef tx;
     uint256 hashBlock;
-    if (!GetTransaction(GetConfig(), hash, tx, hashBlock, true))
+    if (!GetTransaction(GetConfig(), txId, tx, hashBlock, true))
         return null;
 	
 	if(checkInReq)
