@@ -140,14 +140,9 @@ void TxToJSON(const Config &config, const CTransaction &tx,
 
 void TxToJSONExt(const Config &config, const CTransaction &tx,
               const uint256 hashBlock, UniValue &entry) {
-    int64_t inValue = 0;
 
     entry.push_back(Pair("txid", tx.GetId().GetHex()));
     entry.push_back(Pair("hash", tx.GetHash().GetHex()));
-    entry.push_back(Pair(
-        "size", (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION)));
-    entry.push_back(Pair("version", tx.nVersion));
-    entry.push_back(Pair("locktime", (int64_t)tx.nLockTime));
 
     UniValue vin(UniValue::VARR);
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
@@ -157,25 +152,14 @@ void TxToJSONExt(const Config &config, const CTransaction &tx,
             in.push_back(Pair("coinbase", HexStr(txin.scriptSig.begin(),
                                                  txin.scriptSig.end())));
         } else {
-            inValue += GetInputAmount(config, txin.prevout.GetTxId().GetHex(), txin.prevout.GetN());
             in.push_back(Pair("txid", txin.prevout.GetTxId().GetHex()));
             in.push_back(Pair("vout", int64_t(txin.prevout.GetN())));
-            UniValue o(UniValue::VOBJ);
-            o.push_back(Pair("asm", ScriptToAsmStr(txin.scriptSig, true)));
-            o.push_back(Pair(
-                "hex", HexStr(txin.scriptSig.begin(), txin.scriptSig.end())));
-            in.push_back(Pair("scriptSig", o));
         }
 
-        in.push_back(Pair("sequence", (int64_t)txin.nSequence));
         vin.push_back(in);
     }
 
     entry.push_back(Pair("vin", vin));
-
-    if(!tx.IsCoinBase() && inValue != 0) {
-        entry.push_back(Pair("satByte",  (inValue - tx.GetValueOut() / SATOSHI) / (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION)));
-    }
 
     UniValue vout(UniValue::VARR);
     for (unsigned int i = 0; i < tx.vout.size(); i++) {
@@ -190,23 +174,6 @@ void TxToJSONExt(const Config &config, const CTransaction &tx,
     }
 
     entry.push_back(Pair("vout", vout));
-
-    if (!hashBlock.IsNull()) {
-        entry.push_back(Pair("blockhash", hashBlock.GetHex()));
-        BlockMap::iterator mi = mapBlockIndex.find(hashBlock);
-        if (mi != mapBlockIndex.end() && (*mi).second) {
-            CBlockIndex *pindex = (*mi).second;
-            if (chainActive.Contains(pindex)) {
-                entry.push_back(
-                    Pair("confirmations",
-                         1 + chainActive.Height() - pindex->nHeight));
-                entry.push_back(Pair("time", pindex->GetBlockTime()));
-                entry.push_back(Pair("blocktime", pindex->GetBlockTime()));
-            } else {
-                entry.push_back(Pair("confirmations", 0));
-            }
-        }
-    }
 }
 
 
