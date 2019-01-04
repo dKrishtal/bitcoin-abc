@@ -1417,19 +1417,20 @@ UniValue getrtx(const Config &config, const std::string& txid, bool checkInReq =
     return result;
 }
 
-UniValue gettxsfrommempoolbyaddresses(const Config &config, const JSONRPCRequest& request)
+UniValue gettxsfrommempoolbytxids(const Config &config, const JSONRPCRequest& request)
 {
-	reqAddresses = request.params;
-	
-    std::vector<uint256> vtxid;
-    mempool.queryHashes(vtxid);
-
-	UniValue tmp;
+    UniValue txids = request.params;
     UniValue a(UniValue::VARR);
-    for (const uint256& hash : vtxid) {
-        tmp = getrtx(config, hash.ToString(), true);
-		if(!tmp.isNull())
-			a.push_back(tmp);
+
+    LOCK(mempool.cs);
+    for (unsigned long i = 0; i < txids.size(); i++)
+    {
+        UniValue txid = txids[i];
+        uint256 hash = ParseHashV(txid, "txid");
+        CTxMemPool::txiter it = mempool.mapTx.find(hash);
+        if (it != mempool.mapTx.end()) {
+            a.push_back(txid);
+        }
     }
 
     return a;
@@ -1488,8 +1489,8 @@ static const ContextFreeRPCCommand commands[] = {
 
     { "blockchain",         "gettxoutproof",          gettxoutproof,          {"txids", "blockhash"} },
     { "blockchain",         "verifytxoutproof",       verifytxoutproof,       {"proof"} },
-    { "blockchain",         "gettxsfrommempoolbyaddresses", gettxsfrommempoolbyaddresses,    	  {"txid", "txid1", "txid2", "..."} },
-    { "blockchain",         "getextendrawmempool",    		getextendrawmempool,    			  {"id"} },
+    { "blockchain",         "gettxsfrommempoolbytxids", gettxsfrommempoolbytxids,    	  {"txid", "txid1", "txid2", "..."} },
+    { "blockchain",         "getextendrawmempool",    getextendrawmempool,    {"id"} },
 };
 // clang-format on
 
