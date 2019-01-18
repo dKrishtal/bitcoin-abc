@@ -154,6 +154,25 @@ void TxToJSONExt(const Config &config, const CTransaction &tx,
         } else {
             in.push_back(Pair("txid", txin.prevout.GetTxId().GetHex()));
             in.push_back(Pair("vout", int64_t(txin.prevout.GetN())));
+
+            CTransactionRef pPrTx;
+            uint256 prHashBlock;
+            GetTransaction(config, txin.prevout.GetTxId(), pPrTx, prHashBlock, true);
+
+            CTransaction prTx = *pPrTx;
+            UniValue prVout(UniValue::VOBJ);
+            for (unsigned int i = 0; i < prTx.vout.size(); i++) {
+                const CTxOut &txout = prTx.vout[i];
+                UniValue out(UniValue::VOBJ);
+                out.push_back(Pair("value", ValueFromAmount(txout.nValue)));
+                out.push_back(Pair("n", (int64_t)i));
+                UniValue o(UniValue::VOBJ);
+                ScriptPubKeyToJSON(config, txout.scriptPubKey, o, true);
+                out.push_back(Pair("scriptPubKey", o));
+                prVout.push_back(out);
+            }
+
+            in.push_back(Pair("prev_vout", prVout));
         }
 
         vin.push_back(in);
